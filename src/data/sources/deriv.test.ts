@@ -33,17 +33,17 @@ vi.mock('@/lib/sentry', () => ({
   captureError: vi.fn(),
 }));
 
+vi.mock('../candle-validation', () => ({
+  isValidCandle: (c: { time: number; open: number; high: number; low: number; close: number }) =>
+    c && c.time > 0 && c.open > 0 && c.high > 0 && c.low > 0 && c.close > 0,
+  filterValidCandles: (candles: unknown[]) => candles.filter((c: any) =>
+    c && c.time > 0 && c.open > 0 && c.high > 0 && c.low > 0 && c.close > 0),
+}));
+
 class MockWebSocket {
   static instances: MockWebSocket[] = [];
   static last(): MockWebSocket { return MockWebSocket.instances[MockWebSocket.instances.length - 1]; }
 
-  // Реальный global.WebSocket.OPEN/.CONNECTING и т.д. — эти статики нужны,
-  // потому что производственный код сравнивает readyState именно с
-  // `WebSocket.OPEN` (глобальным), а не с числом-литералом. Без них любое
-  // сравнение с undefined всегда ложно, и send()/subscribeStreams() тихо
-  // не отправляют ничего даже при открытом соединении — раньше это было
-  // незаметно, потому что fetchHistory в тестах мокался целиком и не
-  // проходил через реальный send().
   static readonly CONNECTING = 0;
   static readonly OPEN = 1;
   static readonly CLOSING = 2;
@@ -58,7 +58,7 @@ class MockWebSocket {
   onopen: (() => void) | null = null;
   onmessage: ((e: { data: string }) => void) | null = null;
   onerror: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((ev: { code: number }) => void) | null = null;
   sent: string[] = [];
 
   constructor(public url: string) {
@@ -75,7 +75,7 @@ class MockWebSocket {
 
   send(data: string) { this.sent.push(data); }
 
-  close() { this.readyState = 3; this.onclose?.(); }
+  close() { this.readyState = 3; this.onclose?.({ code: 1006 }); }
 
   fireOpen() { this.readyState = 1; this.onopen?.(); }
 
@@ -114,10 +114,6 @@ describe('DerivSource fallback polling', () => {
     const ws = MockWebSocket.last();
     ws.fireOpen();
 
-    // Резолвим subscribeStreams (ticks-subscribe req_id 1, ohlc-subscribe
-    // req_id 2) — с реальными WebSocket.OPEN-константами в моке send()
-    // теперь действительно уходит в сокет и ждёт ответа, поэтому оба
-    // запроса нужно закрыть, иначе connect() зависнет на requestTimeoutMs.
     await flushMicrotasks();
     ws.fireMessage({ req_id: 1 });
     await flushMicrotasks();
@@ -128,8 +124,6 @@ describe('DerivSource fallback polling', () => {
 
     const initialCalls = fetchSpy.mock.calls.length;
 
-    // Стрим не присылает ничего дальше — становится stale, watchdog-polling
-    // должен взять на себя роль основного источника.
     vi.advanceTimersByTime(10_000);
 
     expect(fetchSpy.mock.calls.length).toBeGreaterThan(initialCalls);
@@ -138,11 +132,6 @@ describe('DerivSource fallback polling', () => {
   });
 
   it('does not poll while the WS stream is healthy (recent tick/ohlc message received)', async () => {
-    // Регрессионный тест на фикс "polling как watchdog, а не постоянный
-    // параллельный поток": если стрим реально жив (успешная подписка +
-    // недавнее сообщение), poll() не должен вызываться на каждом тике
-    // таймера — иначе WS и REST гоняются за одной и той же формирующейся
-    // свечой, и REST может перезаписать более свежие/широкие high/low.
     const source = new DerivSource();
     const fetchSpy = vi.spyOn(source, 'fetchHistory').mockResolvedValue([
       { time: 100, open: 1, high: 2, low: 0.5, close: 1.5, volume: 0 },
@@ -152,14 +141,6 @@ describe('DerivSource fallback polling', () => {
     const ws = MockWebSocket.last();
     ws.fireOpen();
 
-    // Резолвим все pending req_id по очереди: fetchHistory замокан
-    // напрямую (не идёт через send()), поэтому единственные реальные
-    // send()-запросы — это subscribeStreams (ticks subscribe, ohlc
-    // subscribe). Отвечаем на оба, чтобы подписка считалась успешной.
-    // flushMicrotasks нужен, потому что между fireOpen и фактическим
-    // ws.send() внутри subscribeStreams лежит несколько промежуточных
-    // await (ensureSocket, мокнутый fetchHistory) — одного tick очереди
-    // микрозадач недостаточно, чтобы до них добраться.
     await flushMicrotasks();
     ws.fireMessage({ req_id: 1 });
     await flushMicrotasks();
@@ -170,18 +151,12 @@ describe('DerivSource fallback polling', () => {
 
     const initialCalls = fetchSpy.mock.calls.length;
 
-    // Стрим шлёт ohlc-апдейты регулярно, чаще, чем таймер fallback-poll
-    // (3с для '1m') — держим его "свежим" на каждом тике таймера, как
-    // вело бы себя реальное живое соединение.
     for (let i = 0; i < 8; i++) {
       vi.advanceTimersByTime(1_000);
       ws.fireMessage({ ohlc: { open_time: 100, open: 1, high: 2, low: 0.5, close: 1.6 } });
     }
 
-    // За 8 секунд поллинг-таймер (интервал 3с) успел бы тикнуть дважды-трижды,
-    // но т.к. стрим все это время оставался "свежим" (heartbeat каждую
-    // секунду < intervalMs*2 = 6с), poll ни разу реально не вызвался.
-    expect(fetchSpy.mock.calls.length).toBe(initialCalls); // poll не вызвался — стрим здоров
+    expect(fetchSpy.mock.calls.length).toBe(initialCalls);
 
     source.disconnect();
   });
@@ -204,9 +179,6 @@ describe('DerivSource fallback polling', () => {
 
     const initialCalls = fetchSpy.mock.calls.length;
 
-    // Стрим "замолкает" дольше 2×intervalMs (2×3000мс для '1m') без новых
-    // сообщений — polling должен снова взять на себя роль основного
-    // источника.
     vi.advanceTimersByTime(9_000);
 
     expect(fetchSpy.mock.calls.length).toBeGreaterThan(initialCalls);
@@ -214,7 +186,6 @@ describe('DerivSource fallback polling', () => {
     source.disconnect();
   });
 });
-
 
 describe('DerivSource endpoint fallback', () => {
   const HISTORY = [{ time: 100, open: 1, high: 2, low: 0.5, close: 1.5, volume: 0 }];
@@ -232,8 +203,6 @@ describe('DerivSource endpoint fallback', () => {
     for (let i = 0; i < times; i++) await Promise.resolve();
   }
 
-  // Отвечает на все ещё не отвеченные запросы с req_id (подписки ticks/ohlc),
-  // чтобы connect() дошёл до конца. fetchHistory в этих тестах замокан.
   async function answerRequests(ws: MockWebSocket, rounds = 6): Promise<void> {
     const answered = new Set<number>();
     for (let i = 0; i < rounds; i++) {
@@ -256,7 +225,7 @@ describe('DerivSource endpoint fallback', () => {
     return source;
   }
 
-  it('tries the primary endpoint (ws.binaryws.com) first and does not touch the fallback when it works', async () => {
+  it('tries the primary endpoint first and does not touch the fallback when it works', async () => {
     const source = makeSource();
     const connectPromise = source.connect('EURUSD', '1m');
 
@@ -271,7 +240,7 @@ describe('DerivSource endpoint fallback', () => {
     source.disconnect();
   });
 
-  it('switches to the fallback endpoint (ws.derivws.com) when the primary errors out', async () => {
+  it('switches to the fallback endpoint when the primary errors out', async () => {
     const source = makeSource();
     const connectPromise = source.connect('EURUSD', '1m');
 
@@ -305,7 +274,6 @@ describe('DerivSource endpoint fallback', () => {
     const source = makeSource();
     const connectPromise = source.connect('EURUSD', '1m');
 
-    // Первый хост молчит: ни open, ни error.
     vi.advanceTimersByTime(5_999);
     await flushMicrotasks();
     expect(urls()).toEqual([PRIMARY_URL]);
@@ -313,7 +281,6 @@ describe('DerivSource endpoint fallback', () => {
     vi.advanceTimersByTime(1);
     await flushMicrotasks();
     expect(urls()).toEqual([PRIMARY_URL, FALLBACK_URL]);
-    // «Зависший» сокет не остаётся висеть в фоне.
     expect(MockWebSocket.instances[0].readyState).toBe(3);
 
     const ws = MockWebSocket.last();
@@ -323,7 +290,7 @@ describe('DerivSource endpoint fallback', () => {
     source.disconnect();
   });
 
-  it('rejects with a message naming both hosts when every endpoint is down, and leaves no background reconnect', async () => {
+  it('rejects with a message naming both hosts when every endpoint is down', async () => {
     const source = makeSource();
     const connectPromise = source.connect('EURUSD', '1m');
     const assertion = expect(connectPromise).rejects.toThrow(/all endpoints unreachable.*primary\.mock.*fallback\.mock/);
@@ -334,8 +301,6 @@ describe('DerivSource endpoint fallback', () => {
     await flushMicrotasks();
     await assertion;
 
-    // Регрессия «зомби»: провалившийся connect() не должен запускать фоновый
-    // scheduleReconnect(). За две минуты — ни одного нового сокета.
     const created = MockWebSocket.instances.length;
     vi.advanceTimersByTime(120_000);
     await flushMicrotasks();
@@ -363,7 +328,6 @@ describe('DerivSource endpoint fallback', () => {
     const source = makeSource();
     const connectPromise = source.connect('EURUSD', '1m');
 
-    // Первичное подключение: primary недоступен, поднимаемся на fallback.
     MockWebSocket.instances[0].fireError();
     await flushMicrotasks();
     const wsFallback = MockWebSocket.last();
@@ -372,13 +336,11 @@ describe('DerivSource endpoint fallback', () => {
     await connectPromise;
     expect(urls()).toEqual([PRIMARY_URL, FALLBACK_URL]);
 
-    // Обрыв соединения → reconnect через 3 с должен снова начать с primary.
     wsFallback.close();
     vi.advanceTimersByTime(3_000);
     await flushMicrotasks();
     expect(urls()).toEqual([PRIMARY_URL, FALLBACK_URL, PRIMARY_URL]);
 
-    // Primary всё ещё лежит → снова fallback (список перебирается заново).
     MockWebSocket.instances[2].fireError();
     await flushMicrotasks();
     expect(urls()).toEqual([PRIMARY_URL, FALLBACK_URL, PRIMARY_URL, FALLBACK_URL]);
@@ -394,7 +356,6 @@ describe('DerivSource endpoint fallback', () => {
     await answerRequests(ws1);
     await connectPromise;
 
-    // Обрыв → штатный reconnect на новый сокет ws2, доводим его до 'live'.
     ws1.close();
     vi.advanceTimersByTime(3_000);
     await flushMicrotasks();
@@ -405,11 +366,9 @@ describe('DerivSource endpoint fallback', () => {
 
     const statuses: string[] = [];
     const unsubscribe = source.onStatus((st) => statuses.push(st));
-    statuses.length = 0; // onStatus сразу отдаёт текущий статус — отбрасываем его
+    statuses.length = 0;
 
-    // Запоздалое событие close от уже замещённого сокета не должно ни
-    // переводить источник в 'reconnecting', ни рвать запросы на живом ws2.
-    ws1.onclose?.();
+    ws1.onclose?.({ code: 1006 });
     await flushMicrotasks();
     expect(statuses).toEqual([]);
 
@@ -428,5 +387,37 @@ describe('DerivSource endpoint fallback', () => {
 
     expect(urls()).toEqual([PRIMARY_URL]);
     expect(MockWebSocket.instances[0].readyState).toBe(3);
+  });
+
+  it('switches to the fallback when the primary opens but ticks_history returns an error', async () => {
+    const source = new DerivSource();
+    // Primary: history fails with a Deriv error. Fallback: history succeeds.
+    let callCount = 0;
+    vi.spyOn(source, 'fetchHistory').mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) return Promise.reject(new Error('InvalidSymbol'));
+      return Promise.resolve(HISTORY);
+    });
+
+    const connectPromise = source.connect('EURUSD', '1m');
+
+    // Primary socket opens successfully.
+    const wsPrimary = MockWebSocket.last();
+    wsPrimary.fireOpen();
+    await flushMicrotasks();
+
+    // fetchHistory (call 1) rejects — should trigger fallback to next endpoint.
+    await flushMicrotasks();
+    expect(urls()).toEqual([PRIMARY_URL, FALLBACK_URL]);
+
+    // Primary socket should be cleaned up.
+    expect(wsPrimary.readyState).toBe(3);
+
+    // Fallback socket opens and succeeds.
+    const wsFallback = MockWebSocket.last();
+    wsFallback.fireOpen();
+    await answerRequests(wsFallback);
+    await expect(connectPromise).resolves.toMatchObject({ source: 'deriv' });
+    source.disconnect();
   });
 });

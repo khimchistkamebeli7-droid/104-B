@@ -2,18 +2,18 @@ import { describe, it, expect } from 'vitest';
 import { PROVIDERS_CONFIG, buildDerivWsUrls, resolveDerivAppId } from './providers.config';
 
 describe('Deriv WS endpoints', () => {
-  it('lists ws.binaryws.com first and ws.derivws.com as the fallback', () => {
+  it('lists ws.derivws.com first and api.derivws.com as the fallback', () => {
     expect(PROVIDERS_CONFIG.deriv.wsEndpoints).toEqual([
-      'wss://ws.binaryws.com/websockets/v3',
       'wss://ws.derivws.com/websockets/v3',
+      'wss://api.derivws.com/trading/v1/options/ws/public',
     ]);
   });
 
-  it('buildDerivWsUrls keeps the priority order and appends the current app_id to every endpoint', () => {
+  it('buildDerivWsUrls keeps the priority order, appends app_id only to the first endpoint', () => {
     const appId = encodeURIComponent(resolveDerivAppId());
     expect(buildDerivWsUrls()).toEqual([
-      `wss://ws.binaryws.com/websockets/v3?app_id=${appId}`,
       `wss://ws.derivws.com/websockets/v3?app_id=${appId}`,
+      'wss://api.derivws.com/trading/v1/options/ws/public',
     ]);
   });
 

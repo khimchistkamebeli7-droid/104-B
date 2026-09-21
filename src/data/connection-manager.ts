@@ -6,6 +6,7 @@ import { captureError } from '@/lib/sentry';
 import { TIMEFRAME_SECONDS, getRoutingChain } from './symbols';
 import { STALE_TICK_MS } from './providers.config';
 import { isMarketOpen } from './market-hours';
+import { isValidCandle, filterValidCandles } from './candle-validation';
 
 const BACKOFF_MS = [1000, 2000, 4000];
 const MAX_ATTEMPTS_PER_SOURCE = 3;
@@ -139,10 +140,11 @@ export class ConnectionManager {
           source.disconnect();
           return null;
         }
+        const validCandles = filterValidCandles(candles);
         this.source = source;
         this.activeSourceId = connectedId;
-        if (candles.length > 0) {
-          this.prevCandleTime = candles[candles.length - 1].time;
+        if (validCandles.length > 0) {
+          this.prevCandleTime = validCandles[validCandles.length - 1].time;
         }
         this.attachSource(source);
         this.setStatus('live');
@@ -150,7 +152,7 @@ export class ConnectionManager {
         void this.syncServerTime();
         this.startPeriodicSync();
         this.startStaleWatchdog();
-        return { status: 'live', candles, source: connectedId };
+        return { status: 'live', candles: validCandles, source: connectedId };
       } catch (err) {
         this.setStatus('reconnecting');
         captureError(new Error(`Source ${sourceId} attempt ${attempt + 1} failed: ${err instanceof Error ? err.message : 'unknown'}`), { level: 'warning' });
@@ -168,6 +170,7 @@ export class ConnectionManager {
   // пришёл. Обновления ЕЩЁ ФОРМИРУЮЩЕЙСЯ свечи (isClosed === false) не
   // ограничиваются — это обычный, частый и безопасный для дедупа поток.
   private emitCandleEvent(candle: Candle, isClosed: boolean): void {
+    if (!isValidCandle(candle)) return;
     if (isClosed) {
       if (this.lastClosedEmitTime === candle.time) return;
       this.lastClosedEmitTime = candle.time;
@@ -214,7 +217,7 @@ export class ConnectionManager {
       const seen = new Set<number>();
       const tfSec = TIMEFRAME_SECONDS[this.activeTimeframe];
       const serverNowSec = Math.floor(serverClock.now() / 1000);
-      for (const c of fresh) {
+      for (const c of filterValidCandles(fresh)) {
         if (seen.has(c.time)) continue;
         seen.add(c.time);
         this.checkStreamIntegrity(c);

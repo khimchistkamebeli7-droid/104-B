@@ -4,6 +4,7 @@ import { connectionManager } from '@/data/connection-manager';
 import { findSymbol, TIMEFRAME_SECONDS } from '@/data/symbols';
 import { isMarketOpen } from '@/data/market-hours';
 import { compactTimeline } from '@/data/compact-timeline';
+import { isValidCandle, filterValidCandles } from '@/data/candle-validation';
 import { workerClient } from '@/compute/WorkerClient';
 import { buildFullSnapshot } from '@/compute/full-snapshot';
 import type { IndicatorSnapshot } from '@/types/domain';
@@ -631,9 +632,10 @@ if (import.meta.hot) {
 }
 
 function dedupeHistory(candles: Candle[]): Candle[] {
+  const valid = filterValidCandles(candles);
   const seen = new Set<number>();
   const out: Candle[] = [];
-  for (const c of candles) {
+  for (const c of valid) {
     if (seen.has(c.time)) continue;
     seen.add(c.time);
     out.push(c);
@@ -671,6 +673,7 @@ export async function handleCandle(
   get: () => TickState,
 ): Promise<void> {
   if (get().activeSymbolId === '') return;
+  if (!isValidCandle(candle)) return;
   const candles = [...get().candles];
   const last = candles[candles.length - 1];
   if (last && last.time === candle.time) {

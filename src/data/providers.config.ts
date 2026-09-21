@@ -16,9 +16,12 @@ export const PROVIDERS_CONFIG = {
     // следующий. Старые публичные хосты Deriv переезжают на новый API
     // (api.derivws.com), поэтому один жёстко зашитый хост — единая точка отказа.
     wsEndpoints: [
-      'wss://ws.binaryws.com/websockets/v3',
       'wss://ws.derivws.com/websockets/v3',
+      'wss://api.derivws.com/trading/v1/options/ws/public',
     ],
+    // api.derivws.com — публичный канал без app_id и без auth.
+    // ws.derivws.com — требует app_id (по умолчанию 1089).
+    wsEndpointsNoAppId: [1],
     defaultAppId: '1089',
     // Сколько ждём открытия сокета на ОДНОМ эндпоинте, прежде чем перейти
     // к следующему. Без этого «зависший» хост (SYN без ответа, тихий DROP)
@@ -67,7 +70,10 @@ export function resolveDerivAppId(): string {
  */
 export function buildDerivWsUrls(): string[] {
   const appId = encodeURIComponent(resolveDerivAppId());
-  return PROVIDERS_CONFIG.deriv.wsEndpoints.map((base) => `${base}?app_id=${appId}`);
+  const noAppId = PROVIDERS_CONFIG.deriv.wsEndpointsNoAppId ?? [];
+  return PROVIDERS_CONFIG.deriv.wsEndpoints.map((base, i) =>
+    noAppId.includes(i) ? base : `${base}?app_id=${appId}`,
+  );
 }
 export const DERIV_DEFAULT_APP_ID = PROVIDERS_CONFIG.deriv.defaultAppId;
 
