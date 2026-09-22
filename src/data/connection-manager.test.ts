@@ -3,7 +3,7 @@ import type { Candle, ConnectionStatus, SourceId, Symbol } from '@/types/domain'
 import type { DataSource, ConnectResult } from '@/data/source';
 
 function mockCandle(time: number): Candle {
-  return { time, open: 100, high: 110, low: 90, close: 105, volume: 1000 };
+  return { time: time || 1700000000, open: 100, high: 110, low: 90, close: 105, volume: 1000 };
 }
 
 function makeSource(id: SourceId, connectFn: () => Promise<ConnectResult>): DataSource {
@@ -198,7 +198,7 @@ describe('ConnectionManager failover', () => {
     expect(received.filter(Boolean)).toHaveLength(1);
 
     // A genuinely new (later) closed candle must still go through normally.
-    capturedOnCandle!(mockCandle(900), true);
+    capturedOnCandle!(mockCandle(1700000900), true);
     expect(received.filter(Boolean)).toHaveLength(2);
 
     mgr.disconnect();

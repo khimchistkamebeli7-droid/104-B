@@ -32,6 +32,11 @@ function hostOf(url: string): string {
 // reconnect пробует его первым, а при неудаче продолжает по списку.
 let lastSuccessfulHost: string | null = null;
 
+/** Сброс сессионного состояния хоста — для тестов. */
+export function resetDerivConnectionState(): void {
+  lastSuccessfulHost = null;
+}
+
 function derivError(host: string, stage: string, detail: string, closeCode?: number): Error {
   const code = closeCode !== undefined ? ` [close ${closeCode}]` : '';
   return new Error(`Deriv ${stage} failed on ${host}${code}: ${detail}`);

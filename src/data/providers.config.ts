@@ -70,7 +70,7 @@ export function resolveDerivAppId(): string {
  */
 export function buildDerivWsUrls(): string[] {
   const appId = encodeURIComponent(resolveDerivAppId());
-  const noAppId = PROVIDERS_CONFIG.deriv.wsEndpointsNoAppId ?? [];
+  const noAppId: readonly number[] = [...(PROVIDERS_CONFIG.deriv.wsEndpointsNoAppId ?? [])];
   return PROVIDERS_CONFIG.deriv.wsEndpoints.map((base, i) =>
     noAppId.includes(i) ? base : `${base}?app_id=${appId}`,
   );

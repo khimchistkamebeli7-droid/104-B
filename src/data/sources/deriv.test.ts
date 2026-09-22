@@ -65,9 +65,9 @@ class MockWebSocket {
     MockWebSocket.instances.push(this);
   }
 
-  addEventListener(event: string, cb: (...args: never[]) => void) {
-    if (event === 'open') this.onopen = cb;
-    if (event === 'error') this.onerror = cb;
+  addEventListener(event: string, cb: (ev: { code: number }) => void) {
+    if (event === 'open') this.onopen = cb as () => void;
+    if (event === 'error') this.onerror = cb as () => void;
     if (event === 'close') this.onclose = cb;
   }
 
@@ -88,12 +88,13 @@ class MockWebSocket {
 
 global.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 
-import { DerivSource } from './deriv';
+import { DerivSource, resetDerivConnectionState } from './deriv';
 
 describe('DerivSource fallback polling', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     MockWebSocket.instances = [];
+    resetDerivConnectionState();
   });
 
   afterEach(() => {
@@ -193,6 +194,7 @@ describe('DerivSource endpoint fallback', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     MockWebSocket.instances = [];
+    resetDerivConnectionState();
   });
 
   afterEach(() => {
@@ -311,20 +313,25 @@ describe('DerivSource endpoint fallback', () => {
     const source = new DerivSource();
     vi.spyOn(source, 'fetchHistory').mockRejectedValue(new Error('history down'));
     const connectPromise = source.connect('EURUSD', '1m');
-    const assertion = expect(connectPromise).rejects.toThrow('history down');
+    const assertion = expect(connectPromise).rejects.toThrow(/history down/);
 
-    const ws = MockWebSocket.last();
-    ws.fireOpen();
+    const wsPrimary = MockWebSocket.last();
+    wsPrimary.fireOpen();
+    await flushMicrotasks();
+
+    const wsFallback = MockWebSocket.last();
+    wsFallback.fireOpen();
     await flushMicrotasks();
     await assertion;
 
-    expect(ws.readyState).toBe(3);
+    expect(wsPrimary.readyState).toBe(3);
+    expect(wsFallback.readyState).toBe(3);
     vi.advanceTimersByTime(120_000);
     await flushMicrotasks();
-    expect(urls()).toEqual([PRIMARY_URL]);
+    expect(MockWebSocket.instances.length).toBe(2);
   });
 
-  it('restarts from the primary endpoint on every reconnect (not stuck on the fallback)', async () => {
+  it('restarts from the last successful host on reconnect, then falls through to the other', async () => {
     const source = makeSource();
     const connectPromise = source.connect('EURUSD', '1m');
 
@@ -339,11 +346,11 @@ describe('DerivSource endpoint fallback', () => {
     wsFallback.close();
     vi.advanceTimersByTime(3_000);
     await flushMicrotasks();
-    expect(urls()).toEqual([PRIMARY_URL, FALLBACK_URL, PRIMARY_URL]);
+    expect(urls()).toEqual([PRIMARY_URL, FALLBACK_URL, FALLBACK_URL]);
 
     MockWebSocket.instances[2].fireError();
     await flushMicrotasks();
-    expect(urls()).toEqual([PRIMARY_URL, FALLBACK_URL, PRIMARY_URL, FALLBACK_URL]);
+    expect(urls()).toEqual([PRIMARY_URL, FALLBACK_URL, FALLBACK_URL, PRIMARY_URL]);
 
     source.disconnect();
   });
